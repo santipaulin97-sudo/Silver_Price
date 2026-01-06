@@ -1,12 +1,18 @@
-🤖 News Sentiment & Silver Price Prediction Bot
+# 🤖 News Sentiment & Silver Price Prediction Bot
+
 This project contains two automated financial bots that analyze market trends and send email reports:
 
-📌 Features
-✅ Financial news sentiment analysis (USD)
-✅ Silver price forecasting  using Prophet
-✅ Automatic forecasting charts
-✅ Daily email reports in HTML
-✅ Market trend logic: 📈 Up | 📉 Down | ➖ Neutral
-✅ Supports automated execution via scheduler or GitHub Actions
+---
 
-🧱 Project Structure
+## 📌 Features
+
+✅ Financial news sentiment analysis (USD)  
+✅ Silver price forecasting (XAUUSD) using Prophet  
+✅ Automatic forecasting charts  
+✅ Daily email reports in HTML  
+✅ Market trend logic: 📈 Up | 📉 Down | ➖ Neutral  
+✅ Supports automated execution via scheduler or GitHub Actions  
+
+---
+
+## 🧱 Project Structure
