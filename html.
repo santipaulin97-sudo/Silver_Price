@@ -1,0 +1,376 @@
+import os
+import logging
+import smtplib
+import warnings
+import numpy as np
+import pandas as pd
+import yfinance as yf
+import requests
+import matplotlib.pyplot as plt
+from datetime import datetime, date, timedelta
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
+from sklearn.linear_model import LinearRegression
+from sklearn.exceptions import DataConversionWarning
+from dataclasses import dataclass
+from typing import Tuple, Dict, List, Optional
+
+# Silenciar advertencias
+warnings.filterwarnings(action='ignore', category=DataConversionWarning)
+warnings.filterwarnings(action='ignore', category=FutureWarning)
+
+# ---------------------------------------------------------
+# 1. CONFIGURACIÓN (PLATA / SILVER)
+# ---------------------------------------------------------
+# TICKER DE LA PLATA
+DEFAULT_TICKER = "SI=F" 
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - [%(levelname)s] - %(message)s',
+    handlers=[logging.StreamHandler()] 
+)
+logger = logging.getLogger("SilverBot_v1.0")
+
+@dataclass
+class Config:
+    TICKER: str = os.getenv("TICKER", DEFAULT_TICKER)
+    EMAIL_USER: str = os.getenv("EMAIL_USER", DEFAULT_EMAIL_USER)
+    EMAIL_PASS: str = os.getenv("EMAIL_PASS", DEFAULT_EMAIL_PASS)
+    EMAIL_DEST: str = os.getenv("EMAIL_DEST", DEFAULT_EMAIL_DEST)
+    SMTP_SERVER: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+
+# ---------------------------------------------------------
+# 2. SERVICIOS EXTERNOS
+# ---------------------------------------------------------
+def obtener_eventos_economicos_eeuu() -> List[Dict]:
+    try:
+        url = "https://api.finnworlds.com/economic_calendar?country=US&limit=5"
+        headers = {"Accept": "application/json"}
+        response = requests.get(url, headers=headers, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            eventos = []
+            for evento in data.get("events", []):
+                eventos.append({
+                    "fecha": evento.get("date", "N/A"), 
+                    "nombre": evento.get("title", "N/A"), 
+                    "impacto": evento.get("impact", "N/A")
+                })
+            return eventos
+        return []
+    except Exception as e:
+        logger.warning(f"API Calendario falló (no crítico): {e}")
+        return []
+
+# ---------------------------------------------------------
+# 3. CEREBRO ANALÍTICO
+# ---------------------------------------------------------
+class FinancialAnalyst:
+    def __init__(self, ticker: str):
+        self.ticker = ticker
+        self.df = pd.DataFrame()
+
+    def get_data(self) -> pd.DataFrame:
+        logger.info(f"Descargando datos para {self.ticker}...")
+        start_date = datetime.now() - timedelta(days=730) 
+        try:
+            self.df = yf.download(self.ticker, start=start_date, progress=False, auto_adjust=True)
+            if isinstance(self.df.columns, pd.MultiIndex):
+                try: self.df = self.df.xs(self.ticker, level=1, axis=1)
+                except: self.df.columns = self.df.columns.droplevel(1)
+            self.df.fillna(method='ffill', inplace=True)
+            return self.df
+        except Exception as e:
+            logger.error(f"Error crítico datos: {e}")
+            return pd.DataFrame()
+
+    def calculate_variations(self) -> List[Dict]:
+        variations = []
+        if self.df.empty: return variations
+        current_price = self.df['Close'].iloc[-1]
+        current_date = self.df.index[-1]
+        periods = {"1 Semana": 7, "1 Mes": 30, "3 Meses": 90, "6 Meses": 180}
+        
+        for label, days in periods.items():
+            target_date = current_date - timedelta(days=days)
+            idx = self.df.index.get_indexer([target_date], method='pad')[0]
+            if idx != -1:
+                past_price = self.df['Close'].iloc[idx]
+                pct = ((current_price - past_price) / past_price) * 100
+                variations.append({
+                    "periodo": label, "precio_ant": past_price, "variacion": pct,
+                    "color": "#27ae60" if pct >= 0 else "#c0392b",
+                    "arrow": "▲" if pct >= 0 else "▼"
+                })
+        return variations
+
+    def perform_regression_analysis(self) -> Tuple[pd.DataFrame, pd.DataFrame, float]:
+        df_reg = self.df.dropna().copy()
+        df_reg['Ordinal'] = df_reg.index.map(date.toordinal)
+        model = LinearRegression().fit(df_reg[['Ordinal']], df_reg['Close'])
+
+        hoy = datetime.now()
+        fechas_futuras = pd.date_range(start=hoy, end="2026-12-31", freq='QS-DEC').to_pydatetime()
+        dias_futuros = [d.toordinal() for d in fechas_futuras]
+        
+        ultimo_dia_graf = date(2026, 12, 31).toordinal()
+        dias_graf = np.arange(df_reg['Ordinal'].iat[-1] + 1, ultimo_dia_graf + 1)
+        
+        pred_tabla = model.predict(pd.DataFrame(dias_futuros, columns=['Ordinal'])).flatten()
+        pred_graf = model.predict(pd.DataFrame(dias_graf, columns=['Ordinal'])).flatten()
+
+        df_tabla = pd.DataFrame({'Fecha': [f.strftime('%B %Y') for f in fechas_futuras], 'Precio': pred_tabla})
+        df_grafico = pd.DataFrame({'Proyeccion': pred_graf}, index=[date.fromordinal(d) for d in dias_graf])
+        precio_2026 = pred_tabla[-1] if len(pred_tabla) > 0 else 0.0
+        return df_tabla, df_grafico, precio_2026
+
+    def generate_full_analysis(self) -> Dict:
+        if self.df.empty or len(self.df) < 200: return {"status": "ERROR"}
+        
+        # --- CÁLCULO DE MEDIAS MÓVILES (CRÍTICO) ---
+        self.df['SMA_50'] = self.df['Close'].rolling(window=50).mean()
+        self.df['SMA_200'] = self.df['Close'].rolling(window=200).mean()
+        # -------------------------------------------
+
+        precio_actual = self.df['Close'].iloc[-1]
+        
+        inicio_anio = datetime(datetime.now().year, 1, 1).strftime('%Y-%m-%d')
+        df_ytd = self.df.loc[self.df.index >= inicio_anio]
+        rendimiento_ytd = ((precio_actual - df_ytd['Close'].iloc[0]) / df_ytd['Close'].iloc[0] * 100) if not df_ytd.empty else 0.0
+
+        delta = self.df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        
+        if loss.iloc[-1] == 0:
+            rsi = 100
+        else:
+            rsi = 100 - (100 / (1 + (gain / loss))).iloc[-1]
+
+        variaciones = self.calculate_variations()
+        df_tabla, df_graf_fut, precio_2026 = self.perform_regression_analysis()
+        
+        df_tabla_fmt = df_tabla.copy()
+        df_tabla_fmt['Precio'] = df_tabla_fmt['Precio'].apply(lambda x: f"${x:,.2f}")
+        tabla_proy_html = df_tabla_fmt.to_html(index=False, justify='center', border=0, classes='projections_table')
+
+        decision, icon, justificacion = "Mantener", "⚖️", "Mercado lateral. Monitorear."
+        
+        if rsi > 70: 
+            decision, icon, justificacion = "Venta / Precaución", "⚠️", "RSI > 70 (Sobrecompra extrema)."
+        elif self.df['SMA_50'].iloc[-1] < self.df['SMA_200'].iloc[-1]: 
+            decision, icon, justificacion = "Venta", "📉", "Cruce de la muerte técnico confirmado."
+        elif len(variaciones) > 3 and variaciones[3]['variacion'] > 10 and precio_2026 > precio_actual:
+             decision, icon, justificacion = "Comprar Fuerte", "🚀", f"Tendencia semestral sólida y proyección alcista."
+
+        return {
+            "status": "OK", "precio_actual": precio_actual, "rendimiento_ytd": rendimiento_ytd,
+            "variaciones": variaciones, "precio_final_proyectado": precio_2026,
+            "decision": decision, "justificacion": justificacion, "icon": icon, "rsi": rsi,
+            "tabla_proy_html": tabla_proy_html, "df_grafico_futuro": df_graf_fut
+        }
+
+# ---------------------------------------------------------
+# 4. VISUALIZACIÓN (ESTILO SILVER)
+# ---------------------------------------------------------
+def create_hybrid_chart(df_hist: pd.DataFrame, df_fut: pd.DataFrame, analysis: Dict) -> str:
+    try:
+        plt.style.use('dark_background')
+        fig, ax = plt.subplots(figsize=(12, 7), dpi=150)
+        start_plot = datetime.now() - timedelta(days=365)
+        df_plot = df_hist[df_hist.index > start_plot]
+        
+        # COLOR PLATEADO PARA LA PLATA (#BDC3C7)
+        ax.plot(df_plot.index, df_plot['Close'], label='Histórico (1 Año)', color='#BDC3C7', linewidth=2)
+        
+        if not df_fut.empty:
+            ax.plot(df_fut.index, df_fut['Proyeccion'], label='Proyección IA', color='#3498DB', linestyle='--')
+            fin_precio = analysis['precio_final_proyectado']
+            fin_fecha = df_fut.index[-1]
+            ax.scatter(fin_fecha, fin_precio, color='#2ECC71', zorder=5, s=100)
+            ax.text(fin_fecha, fin_precio, f" Dic 2026: ${fin_precio:,.2f}", color='#2ECC71', ha='right', va='bottom', fontsize=11, fontweight='bold')
+
+        ax.set_title(f"Análisis PLATA: Histórico vs Proyección", fontsize=16, color='white', fontweight='bold')
+        ax.set_ylabel("Precio (USD)")
+        ax.grid(color='gray', linestyle=':', linewidth=0.3)
+        ax.legend(loc='upper left')
+        
+        filename = "silver_hybrid_chart.png"
+        plt.tight_layout()
+        plt.savefig(filename)
+        plt.close()
+        return filename
+    except Exception as e: logger.error(f"Error gráfico: {e}"); return None
+
+# ---------------------------------------------------------
+# 5. MENSAJERÍA (CSS ESTILO SILVER)
+# ---------------------------------------------------------
+class EmailSender:
+    def __init__(self, config: Config): self.cfg = config
+
+    def send_full_report(self, data: Dict, events: List[Dict], chart_path: str):
+        if not self.cfg.EMAIL_USER: return
+        logger.info("Renderizando HTML Silver...")
+
+        variations_rows = ""
+        for v in data['variaciones']:
+            variations_rows += f"""
+            <tr class="highlight-row">
+                <td style="padding:14px 10px; border-bottom:1px solid #eee; font-weight:500; color:#555;">{v['periodo']}</td>
+                <td style="padding:14px 10px; border-bottom:1px solid #eee; color:#777;">${v['precio_ant']:,.2f}</td>
+                <td style="padding:14px 10px; border-bottom:1px solid #eee; color:{v['color']}; font-weight:800;">{v['arrow']} {v['variacion']:.2f}%</td>
+            </tr>"""
+
+        events_html = "".join([f"<li><strong>{e['fecha']}</strong>: {e['nombre']} <span style='color:#d35400'>({e['impacto']})</span></li>" for e in events]) or "<li>No hay eventos próximos relevantes.</li>"
+        fecha_titulo = datetime.now().strftime('%d de %B, %Y')
+
+        # ESTILO SILVER: CAMBIAMOS EL ACENTO DE #F1C40F (ORO) A #7F8C8D (PLATA)
+        ACCENT_COLOR = "#7F8C8D" 
+
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <style>
+            body {{ font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f4f7f6; color: #333; margin: 0; padding: 20px 0; }}
+            .container {{ max-width: 700px; margin: auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 5px 20px rgba(0,0,0,0.08); }}
+            
+            /* HEADER PLATEADO */
+            .header {{ background-color: #2c3e50; color: {ACCENT_COLOR}; padding: 25px; text-align: center; border-bottom: 4px solid {ACCENT_COLOR}; }}
+            .header h1 {{ margin:0; font-size:24px; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 900; color: #ecf0f1; }}
+            
+            .kpi-row {{ display: flex; justify-content: space-between; gap: 15px; margin-bottom: 35px; }}
+            .kpi-card {{ 
+                background: #fff; width: 32%; padding: 25px 10px; border-radius: 12px; text-align: center; 
+                border: 2px solid #eef2f7; box-shadow: 0 2px 6px rgba(0,0,0,0.03); transition: all 0.3s ease; 
+            }}
+            .kpi-card:hover {{ 
+                border-color: {ACCENT_COLOR}; 
+                box-shadow: 0 5px 15px rgba(127, 140, 141, 0.25);
+                transform: translateY(-2px);
+            }}
+            .kpi-val {{ font-size: 26px; font-weight: 800; color: #2c3e50; display: block; margin-bottom: 5px; }}
+            .kpi-lbl {{ font-size: 11px; color: #95a5a6; text-transform: uppercase; letter-spacing: 1px; font-weight: 700; }}
+            
+            .var-table {{ width: 100%; border-collapse: separate; border-spacing: 0; margin-bottom: 35px; }}
+            .var-header th {{ text-align: left; padding: 12px 10px; color: #95a5a6; font-size: 11px; text-transform: uppercase; border-bottom: 2px solid #eee; }}
+            
+            .highlight-row {{ transition: all 0.2s ease; border-left: 0px solid transparent; }}
+            .highlight-row:hover {{ background-color: #fff !important; border-left: 4px solid {ACCENT_COLOR}; }}
+            
+            .decision-box {{ background: #fff; border-left: 5px solid {ACCENT_COLOR}; padding: 20px; margin: 30px 0; display: flex; align-items: center; box-shadow: 0 3px 10px rgba(0,0,0,0.04); border-radius: 6px; }}
+            .section-title {{ color: #2c3e50; border-bottom: 2px solid {ACCENT_COLOR}; padding-bottom: 8px; margin-top: 40px; font-size: 17px; font-weight: 800; display: inline-block; }}
+            
+            table.projections_table {{ width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 14px; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }}
+            table.projections_table th {{ background: #2c3e50; color: {ACCENT_COLOR}; padding: 12px; font-weight: 600; }}
+            table.projections_table td {{ border-bottom: 1px solid #eee; padding: 12px; text-align: center; background: #fff; }}
+            table.projections_table tr:nth-child(even) td {{ background: #f8f9fa; }}
+            .footer {{ background: #2c3e50; text-align: center; padding: 25px; font-size: 12px; color: #95a5a6; }}
+        </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>Reporte Mercado: PLATA</h1>
+                    <p style="color:#bdc3c7; font-size:14px; margin-top:5px;">{fecha_titulo}</p>
+                </div>
+                <div style="padding: 35px;">
+                    <div class="kpi-row">
+                        <div class="kpi-card">
+                            <span class="kpi-val">${data['precio_actual']:,.2f}</span>
+                            <span class="kpi-lbl">Precio Actual</span>
+                        </div>
+                        <div class="kpi-card">
+                            <span class="kpi-val" style="color: {'#27ae60' if data['rendimiento_ytd'] > 0 else '#c0392b'}">{data['rendimiento_ytd']:.2f}%</span>
+                            <span class="kpi-lbl">Rendimiento YTD</span>
+                        </div>
+                        <div class="kpi-card">
+                            <span class="kpi-val">${data['precio_final_proyectado']:,.2f}</span>
+                            <span class="kpi-lbl">Proyección 2026</span>
+                        </div>
+                    </div>
+
+                    <div class="section-title" style="margin-top:0;">📊 Rendimiento Reciente</div>
+                    <table class="var-table" style="margin-top:15px;">
+                        <thead><tr class="var-header"><th>Periodo</th><th>Precio Ant.</th><th>Variación %</th></tr></thead>
+                        <tbody>{variations_rows}</tbody>
+                    </table>
+
+                    <div class="decision-box">
+                        <div style="font-size:36px; margin-right:20px;">{data['icon']}</div>
+                        <div>
+                            <div style="font-size:15px; font-weight:800; color:#2c3e50;">Decisión SilverBot: {data['decision']}</div>
+                            <div style="color:#555; margin-top:5px; font-size:14px; line-height:1.4;">{data['justificacion']}</div>
+                        </div>
+                    </div>
+
+                    <div class="section-title">💡 Análisis Técnico (Silver)</div>
+                    <ul style="color:#444; line-height:1.7; font-size:14px;">
+                        <li><strong>RSI (14):</strong> {data['rsi']:.1f} (La plata es más volátil que el oro).</li>
+                        <li>Tendencia global YTD: <strong>{'ALCISTA' if data['rendimiento_ytd'] > 0 else 'BAJISTA'}</strong>.</li>
+                    </ul>
+
+                    <div class="section-title">🗓️ Calendario Económico (EEUU)</div>
+                    <ul style="color:#444; line-height:1.7; font-size:14px;">{events_html}</ul>
+
+                    <div class="section-title">🔮 Proyección Trimestral (IA)</div>
+                    {data['tabla_proy_html']}
+
+                    <div style="margin-top: 40px; text-align: center;">
+                        <h3 style="color:#2c3e50; font-size:16px; margin-bottom:15px;">Gráfico de Tendencia (Silver)</h3>
+                        <img src="cid:chart_image" style="width:100%; border-radius:8px; box-shadow:0 4px 15px rgba(0,0,0,0.15); border:1px solid #eee;">
+                    </div>
+                </div>
+                <div class="footer">
+                    Automated by SilverBot v1.0<br>
+                    Disclaimer: No constituye asesoramiento financiero.
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+
+        msg = MIMEMultipart('related')
+        msg['Subject'] = f"Reporte de Proyección de la Plata - {fecha_titulo}"
+        msg['From'] = self.cfg.EMAIL_USER
+        msg['To'] = self.cfg.EMAIL_DEST
+        msg.attach(MIMEText(html_content, 'html'))
+
+        if chart_path and os.path.exists(chart_path):
+            with open(chart_path, 'rb') as f:
+                img = MIMEImage(f.read())
+                img.add_header('Content-ID', '<chart_image>')
+                msg.attach(img)
+        
+        try:
+            with smtplib.SMTP(self.cfg.SMTP_SERVER, self.cfg.SMTP_PORT) as server:
+                server.starttls()
+                server.login(self.cfg.EMAIL_USER, self.cfg.EMAIL_PASS)
+                server.send_message(msg)
+            logger.info("✅ Reporte PLATA enviado exitosamente.")
+        except Exception as e: logger.error(f"❌ Error SMTP: {e}")
+
+# ---------------------------------------------------------
+# 6. MAIN
+# ---------------------------------------------------------
+def main():
+    config = Config()
+    analyst = FinancialAnalyst(config.TICKER)
+    df = analyst.get_data()
+    if df.empty: return
+
+    full_analysis = analyst.generate_full_analysis()
+    if full_analysis['status'] == 'ERROR': return
+    logger.info(f"Análisis PLATA OK. Precio: ${full_analysis['precio_actual']:.2f}")
+    chart_file = create_hybrid_chart(df, full_analysis['df_grafico_futuro'], full_analysis)
+    eventos = obtener_eventos_economicos_eeuu()
+    mailer = EmailSender(config)
+    mailer.send_full_report(full_analysis, eventos, chart_file)
+    if chart_file and os.path.exists(chart_file): os.remove(chart_file)
+
+if __name__ == "__main__":
+    main()
