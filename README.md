@@ -1,2 +1,12 @@
-# Silver_Price
-Python code who runs everyday and send the report about the Silver price in the moment and the prediction for the next months with a brief description.
+🤖 News Sentiment & Silver Price Prediction Bot
+This project contains two automated financial bots that analyze market trends and send email reports:
+
+📌 Features
+✅ Financial news sentiment analysis (USD)
+✅ Silver price forecasting  using Prophet
+✅ Automatic forecasting charts
+✅ Daily email reports in HTML
+✅ Market trend logic: 📈 Up | 📉 Down | ➖ Neutral
+✅ Supports automated execution via scheduler or GitHub Actions
+
+🧱 Project Structure
