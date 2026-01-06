@@ -7,7 +7,7 @@ This project contains two automated financial bots that analyze market trends an
 ## 📌 Features
 
 ✅ Financial news sentiment analysis (USD)  
-✅ Silver price forecasting (XAUUSD) using Prophet  
+✅ Silver price forecasting using Prophet  
 ✅ Automatic forecasting charts  
 ✅ Daily email reports in HTML  
 ✅ Market trend logic: 📈 Up | 📉 Down | ➖ Neutral  
